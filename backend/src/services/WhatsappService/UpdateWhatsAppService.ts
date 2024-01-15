@@ -12,28 +12,18 @@ interface WhatsappData {
   session?: string;
   isDefault?: boolean;
   greetingMessage?: string;
-  farewellMessage?: string;
+  complationMessage?: string;
+  outOfHoursMessage?: string;
+  ratingMessage?: string;
+  transferMessage?: string;
   queueIds?: number[];
-  transferTicketMessage?: string;
-
-  startWorkHour?: string;
-  endWorkHour?: string;
-  startWorkHourWeekend?: string;
-  endWorkHourWeekend?: string;
-  outOfWorkMessage?: string;
-  monday?: string;
-  tuesday?: string;
-  wednesday?: string;
-  thursday?: string;
-  friday?: string;
-  saturday?: string;
-  sunday?: string;
-  defineWorkHours?: string;
+  token?: string;
 }
 
 interface Request {
   whatsappData: WhatsappData;
   whatsappId: string;
+  companyId: number;
 }
 
 interface Response {
@@ -43,7 +33,8 @@ interface Response {
 
 const UpdateWhatsAppService = async ({
   whatsappData,
-  whatsappId
+  whatsappId,
+  companyId
 }: Request): Promise<Response> => {
   const schema = Yup.object().shape({
     name: Yup.string().min(2),
@@ -57,27 +48,17 @@ const UpdateWhatsAppService = async ({
     isDefault,
     session,
     greetingMessage,
-    farewellMessage,
+    complationMessage,
+    outOfHoursMessage,
+    ratingMessage,
+    transferMessage,
     queueIds = [],
-    transferTicketMessage,
-    startWorkHour,
-    endWorkHour,
-    startWorkHourWeekend,
-    endWorkHourWeekend,
-    outOfWorkMessage,
-    monday,
-    tuesday,
-    wednesday,
-    thursday,
-    friday,
-    saturday,
-    sunday,
-    defineWorkHours
+    token
   } = whatsappData;
 
   try {
     await schema.validate({ name, status, isDefault });
-  } catch (err) {
+  } catch (err: any) {
     throw new AppError(err.message);
   }
 
@@ -89,36 +70,32 @@ const UpdateWhatsAppService = async ({
 
   if (isDefault) {
     oldDefaultWhatsapp = await Whatsapp.findOne({
-      where: { isDefault: true, id: { [Op.not]: whatsappId } }
+      where: {
+        isDefault: true,
+        id: { [Op.not]: whatsappId },
+        companyId
+      }
     });
     if (oldDefaultWhatsapp) {
       await oldDefaultWhatsapp.update({ isDefault: false });
     }
   }
 
-  const whatsapp = await ShowWhatsAppService(whatsappId);
-
+  const whatsapp = await ShowWhatsAppService(whatsappId, companyId);
+  // console.log(transferMessage)
+  console.log(whatsapp)
   await whatsapp.update({
     name,
     status,
     session,
     greetingMessage,
-    farewellMessage,
+    complationMessage,
+    outOfHoursMessage,
+    ratingMessage,
     isDefault,
-    transferTicketMessage,
-    startWorkHour,
-    endWorkHour,
-    startWorkHourWeekend,
-    endWorkHourWeekend,
-    outOfWorkMessage,
-    monday,
-    tuesday,
-    wednesday,
-    thursday,
-    friday,
-    saturday,
-    sunday,
-    defineWorkHours
+    companyId,
+    token,
+    transferMessage,
   });
 
   await AssociateWhatsappQueue(whatsapp, queueIds);

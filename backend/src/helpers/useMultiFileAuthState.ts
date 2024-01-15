@@ -5,32 +5,20 @@ import {
   SignalDataTypeMap,
   initAuthCreds,
   BufferJSON
-} from "@whiskeysockets/baileys";
+} from "@adiwajshing/baileys";
 import Whatsapp from "../models/Whatsapp";
-import BaileysSessions from "../models/BaileysSessions";
+import { cacheLayer } from "../libs/cache";
+import { logger } from "../utils/logger";
 
 export const useMultiFileAuthState = async (
   whatsapp: Whatsapp
 ): Promise<{ state: AuthenticationState; saveCreds: () => Promise<void> }> => {
   const writeData = async (data: any, file: string) => {
     try {
-      const existing = await BaileysSessions.findOne({
-        where: {
-          whatsappId: whatsapp.id,
-          name: file
-        }
-      });
-      if (existing) {
-        await existing.update({
-          value: JSON.stringify(data, BufferJSON.replacer)
-        });
-      } else {
-        await BaileysSessions.create({
-          whatsappId: whatsapp.id,
-          value: JSON.stringify(data, BufferJSON.replacer),
-          name: file
-        });
-      }
+      await cacheLayer.set(
+        `sessions:${whatsapp.id}:${file}`,
+        JSON.stringify(data, BufferJSON.replacer)
+      );
     } catch (error) {
       console.log("writeData error", error);
       return null;
@@ -39,15 +27,10 @@ export const useMultiFileAuthState = async (
 
   const readData = async (file: string) => {
     try {
-      const data = await BaileysSessions.findOne({
-        where: {
-          whatsappId: whatsapp.id,
-          name: file
-        }
-      });
+      const data = await cacheLayer.get(`sessions:${whatsapp.id}:${file}`);
 
-      if (data && data.value !== null) {
-        return JSON.parse(JSON.stringify(data.value), BufferJSON.reviver);
+      if (data) {
+        return JSON.parse(data, BufferJSON.reviver);
       }
       return null;
     } catch (error) {
@@ -58,12 +41,7 @@ export const useMultiFileAuthState = async (
 
   const removeData = async (file: string) => {
     try {
-      await BaileysSessions.destroy({
-        where: {
-          whatsappId: whatsapp.id,
-          name: file
-        }
-      });
+      await cacheLayer.del(`sessions:${whatsapp.id}:${file}`);
     } catch (error) {
       console.log("removeData", error);
     }
@@ -78,16 +56,23 @@ export const useMultiFileAuthState = async (
       keys: {
         get: async (type, ids) => {
           const data: { [_: string]: SignalDataTypeMap[typeof type] } = {};
-          await Promise.all(
-            ids.map(async id => {
+
+          for (let id of ids) {
+            try {
               let value = await readData(`${type}-${id}`);
               if (type === "app-state-sync-key") {
                 value = proto.Message.AppStateSyncKeyData.fromObject(value);
               }
-
               data[id] = value;
-            })
-          );
+            } catch (error) {
+              logger.error(
+                `useMultiFileAuthState (69) -> error: ${error.message}`
+              );
+              logger.error(
+                `useMultiFileAuthState (72) -> stack: ${error.stack}`
+              );
+            }
+          }
 
           return data;
         },

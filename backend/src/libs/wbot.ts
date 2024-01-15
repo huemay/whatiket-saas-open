@@ -1,28 +1,28 @@
+import * as Sentry from "@sentry/node";
 import makeWASocket, {
   AuthenticationState,
   DisconnectReason,
   fetchLatestBaileysVersion,
   makeInMemoryStore,
   WASocket
-} from "@whiskeysockets/baileys";
+} from "@adiwajshing/baileys";
+import P from "pino";
 
-import { Boom } from "@hapi/boom";
-import MAIN_LOGGER from "@whiskeysockets/baileys/lib/Utils/logger";
-import NodeCache from "node-cache";
 import Whatsapp from "../models/Whatsapp";
 import { logger } from "../utils/logger";
+import MAIN_LOGGER from "@adiwajshing/baileys/lib/Utils/logger";
+import {useMultiFileAuthState} from "../helpers/useMultiFileAuthState";
+import authState from "../helpers/authState";
+import { Boom } from "@hapi/boom";
 import AppError from "../errors/AppError";
 import { getIO } from "./socket";
 import { Store } from "./store";
 import { StartWhatsAppSession } from "../services/WbotServices/StartWhatsAppSession";
 import DeleteBaileysService from "../services/BaileysServices/DeleteBaileysService";
-import { useMultiFileAuthState } from "../helpers/useMultiFileAuthState";
-import BaileysSessions from "../models/BaileysSessions";
-
-const msgRetryCounterCache = new NodeCache();
+import { cacheLayer } from "./cache";
 
 const loggerBaileys = MAIN_LOGGER.child({});
-loggerBaileys.level = "silent";
+loggerBaileys.level = "error";
 
 type Session = WASocket & {
   id?: number;
@@ -61,8 +61,8 @@ export const removeWbot = async (
   }
 };
 
-export const initWbot = async (whatsapp: Whatsapp): Promise<Session> => {
-  return new Promise((resolve, reject) => {
+export const initWASocket = async (whatsapp: Whatsapp): Promise<Session> => {
+  return new Promise(async (resolve, reject) => {
     try {
       (async () => {
         const io = getIO();
@@ -73,18 +73,17 @@ export const initWbot = async (whatsapp: Whatsapp): Promise<Session> => {
 
         if (!whatsappUpdate) return;
 
-        const { id, name, isMultidevice } = whatsappUpdate;
-        const { isLatest, version } = await fetchLatestBaileysVersion();
+        const { id, name, provider } = whatsappUpdate;
+
+        const { version, isLatest } = await fetchLatestBaileysVersion();
+        const isLegacy = provider === "stable" ? true : false;
 
         logger.info(`using WA v${version.join(".")}, isLatest: ${isLatest}`);
-        logger.info(`isMultidevice: ${isMultidevice}`);
+        logger.info(`isLegacy: ${isLegacy}`);
         logger.info(`Starting session ${name}`);
         let retriesQrCode = 0;
 
         let wsocket: Session = null;
-        const store = makeInMemoryStore({
-          logger: loggerBaileys
-        });
 
         const { state, saveCreds } = await useMultiFileAuthState(whatsapp);
 
@@ -92,15 +91,9 @@ export const initWbot = async (whatsapp: Whatsapp): Promise<Session> => {
           logger: loggerBaileys,
           printQRInTerminal: false,
           auth: state as AuthenticationState,
-          version,
-          msgRetryCounterCache,
-          getMessage: async key => {
-            if (store) {
-              const msg = await store.loadMessage(key.remoteJid!, key.id!);
-              return msg?.message || undefined;
-            }
-          }
+          version: [2,2323,4]
         });
+
 
         wsocket.ev.on(
           "connection.update",
@@ -111,56 +104,39 @@ export const initWbot = async (whatsapp: Whatsapp): Promise<Session> => {
               }`
             );
 
-            const disconect = (lastDisconnect?.error as Boom)?.output
-              ?.statusCode;
-
             if (connection === "close") {
-              if (disconect === 403) {
-                await whatsapp.update({
-                  status: "PENDING",
-                  session: "",
-                  number: ""
-                });
+              if ((lastDisconnect?.error as Boom)?.output?.statusCode === 403) {
+                await whatsapp.update({ status: "PENDING", session: "" });
                 await DeleteBaileysService(whatsapp.id);
-
-                await BaileysSessions.destroy({
-                  where: {
-                    whatsappId: whatsapp.id
-                  }
-                });
-
-                io.emit("whatsappSession", {
+                await cacheLayer.delFromPattern(`sessions:${whatsapp.id}:*`);
+                io.emit(`company-${whatsapp.companyId}-whatsappSession`, {
                   action: "update",
                   session: whatsapp
                 });
                 removeWbot(id, false);
               }
-
-              if (disconect !== DisconnectReason.loggedOut) {
+              if (
+                (lastDisconnect?.error as Boom)?.output?.statusCode !==
+                DisconnectReason.loggedOut
+              ) {
                 removeWbot(id, false);
-                setTimeout(() => StartWhatsAppSession(whatsapp), 2000);
-              }
-
-              if (disconect === DisconnectReason.loggedOut) {
-                await whatsapp.update({
-                  status: "PENDING",
-                  session: "",
-                  number: ""
-                });
+                setTimeout(
+                  () => StartWhatsAppSession(whatsapp, whatsapp.companyId),
+                  2000
+                );
+              } else {
+                await whatsapp.update({ status: "PENDING", session: "" });
                 await DeleteBaileysService(whatsapp.id);
-
-                await BaileysSessions.destroy({
-                  where: {
-                    whatsappId: whatsapp.id
-                  }
-                });
-
-                io.emit("whatsappSession", {
+                await cacheLayer.delFromPattern(`sessions:${whatsapp.id}:*`);
+                io.emit(`company-${whatsapp.companyId}-whatsappSession`, {
                   action: "update",
                   session: whatsapp
                 });
                 removeWbot(id, false);
-                setTimeout(() => StartWhatsAppSession(whatsapp), 2000);
+                setTimeout(
+                  () => StartWhatsAppSession(whatsapp, whatsapp.companyId),
+                  2000
+                );
               }
             }
 
@@ -171,7 +147,7 @@ export const initWbot = async (whatsapp: Whatsapp): Promise<Session> => {
                 retries: 0
               });
 
-              io.emit("whatsappSession", {
+              io.emit(`company-${whatsapp.companyId}-whatsappSession`, {
                 action: "update",
                 session: whatsapp
               });
@@ -194,11 +170,7 @@ export const initWbot = async (whatsapp: Whatsapp): Promise<Session> => {
                   qrcode: ""
                 });
                 await DeleteBaileysService(whatsappUpdate.id);
-                await BaileysSessions.destroy({
-                  where: {
-                    whatsappId: whatsapp.id
-                  }
-                });
+                await cacheLayer.delFromPattern(`sessions:${whatsapp.id}:*`);
                 io.emit("whatsappSession", {
                   action: "update",
                   session: whatsappUpdate
@@ -206,7 +178,6 @@ export const initWbot = async (whatsapp: Whatsapp): Promise<Session> => {
                 wsocket.ev.removeAllListeners("connection.update");
                 wsocket.ws.close();
                 wsocket = null;
-                // retriesQrCode = 0;
                 retriesQrCodeMap.delete(id);
               } else {
                 logger.info(`Session QRCode Generate ${name}`);
@@ -226,7 +197,7 @@ export const initWbot = async (whatsapp: Whatsapp): Promise<Session> => {
                   sessions.push(wsocket);
                 }
 
-                io.emit("whatsappSession", {
+                io.emit(`company-${whatsapp.companyId}-whatsappSession`, {
                   action: "update",
                   session: whatsapp
                 });
@@ -234,13 +205,10 @@ export const initWbot = async (whatsapp: Whatsapp): Promise<Session> => {
             }
           }
         );
-
         wsocket.ev.on("creds.update", saveCreds);
-
-        wsocket.store = store;
-        store.bind(wsocket.ev);
       })();
     } catch (error) {
+      Sentry.captureException(error);
       console.log(error);
       reject(error);
     }
